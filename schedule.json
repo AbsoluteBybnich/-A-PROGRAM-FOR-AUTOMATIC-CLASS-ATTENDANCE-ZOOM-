@@ -1,0 +1,38 @@
+{
+  "join_minutes_before": 1,
+  "week1_monday": "2026-10-26",
+  "_comment": "week1_monday = a Monday that is week 1 (any such Monday works); weeks then alternate 1,2,1,2... A lesson without the 'week' field runs every week. Copy this file to schedule.json and put your own Zoom links in.",
+  "lessons": [
+    {
+      "week": 1,
+      "days": ["mon", "wed"],
+      "start": "08:30",
+      "end": "10:00",
+      "title": "Math. Lecture",
+      "link": "https://us04web.zoom.us/j/1234567890?pwd=XXXXXXXXXXXXXXXX"
+    },
+    {
+      "week": 2,
+      "days": ["tue"],
+      "start": "10:25",
+      "end": "11:55",
+      "title": "Physics. Practice (week 2 only)",
+      "link": "https://us02web.zoom.us/j/0987654321?pwd=YYYYYYYYYYYYYYYY"
+    },
+    {
+      "days": ["fri"],
+      "start": "12:20",
+      "end": "13:50",
+      "title": "English. Every week (no 'week' field)",
+      "link": "https://us05web.zoom.us/j/5555555555?pwd=ZZZZZZZZZZZZZZZZ"
+    },
+    {
+      "days": ["sat"],
+      "start": "08:30",
+      "end": "10:00",
+      "title": "Example of a skipped lesson",
+      "link": "https://us04web.zoom.us/j/1111111111?pwd=WWWWWWWWWWWWWWWW",
+      "enabled": false
+    }
+  ]
+}
