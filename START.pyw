@@ -336,14 +336,14 @@ class App:
         self.wish.pack(anchor="w", pady=(4, 0))
 
         right = tk.Frame(header, bg=PANEL)
-        right.grid(row=0, column=1, sticky="ne", padx=(16, 14))
+        right.grid(row=0, column=1, sticky="se", padx=(16, 16))   # bottom-aligned: date on the wish line
         self.clock = tk.Label(right, text="--:--:--", fg=FG, bg=PANEL, font=(FONT, 24, "bold"))
         self.clock.pack(anchor="e")
         self.date = tk.Label(right, text="", fg=MUTED, bg=PANEL, font=(FONT, 10))
         self.date.pack(anchor="e")
 
         self.btn_menu = IconButton(header, "menu", lambda: self.drawer.toggle(), bg=PANEL)
-        self.btn_menu.grid(row=0, column=2, sticky="ne")
+        self.btn_menu.grid(row=0, column=2, sticky="e")             # vertically centred
         Tooltip(self.btn_menu, "Menu: join by link, today's classes, stats, restart the bot")
 
         # main actions
