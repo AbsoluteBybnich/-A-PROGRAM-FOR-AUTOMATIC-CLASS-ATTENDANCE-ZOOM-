@@ -32,6 +32,7 @@ import glob
 import json
 import os
 import queue
+from collections import deque
 import random
 import re
 import subprocess
@@ -133,7 +134,11 @@ MAX_COMPRESSION_RATIO = 2.4   # higher = repeated/looping text, a typical halluc
 CPU_THREADS = None       # None = auto (about half of the cores, at most 4)
 LOW_PRIORITY = True      # run the bot at "below normal" priority so other programs stay smooth
 LISTEN_LIMIT_MIN = None  # e.g. 20 = listen only during the first 20 minutes of each class; None = whole class
-LOG_TRANSCRIPTS = True   # print what was heard (repeated lines are skipped); False = print only matches
+LOG_TRANSCRIPTS = True   # log what was heard (repeated lines are skipped); False = log only matches
+SHOW_TRANSCRIPTS = False # False: what was heard goes only to logs/*.log; the window shows the important lines
+                         # (joining, answer, errors) and speech only AROUND your name. Test modes show everything
+CONTEXT_BEFORE_SEC = 6   # "around your name": how much speech before it is shown in the window ...
+CONTEXT_AFTER_SEC = 6    # ... and how long after it
 LOG_TO_FILE = True       # also save everything to logs/YYYY-MM-DD.log (to see later why it answered)
 LOG_KEEP_DAYS = 30
 RECORD_CLASSES = True    # save what the bot heard in each class to logs/recordings/*.ogg (~1 MB per minute).
@@ -338,6 +343,26 @@ def setup_file_log():
 
 def ts():
     return f"[{datetime.now():%H:%M:%S}]"
+
+
+def window_only(line):
+    """Shows a line in the console/window without writing it to the log file again."""
+    out = sys.stdout
+    try:
+        (out.stream if isinstance(out, _Tee) else out).write(line + "\n")
+    except Exception:
+        pass
+
+
+def file_only(line):
+    """Writes a line to logs/YYYY-MM-DD.log without showing it in the console/window."""
+    out = sys.stdout
+    if isinstance(out, _Tee):
+        with out.lock:
+            try:
+                out._file().write(line + "\n")
+            except Exception:
+                pass
 
 
 def lower_priority():
@@ -695,6 +720,8 @@ class Listener:
         self.last_gc = time.time()
         self.clock = time.time         # replaced by the position in the recording in --test-file
         self.stamp = ts
+        self.context = deque(maxlen=40)  # recent speech lines kept for "around your name"
+        self.show_until = 0.0
         self.test_answers = []
         self.sound_check = None
         if SOUND_CHECK:
@@ -878,6 +905,18 @@ class Listener:
                 self.last_gc = time.time()
             time.sleep(self.pass_gap)
 
+    def _show_context(self, now):
+        """My name (or a look-alike) was heard: show in the window what was said just before it
+        (those lines are already in the log file) and keep showing speech for CONTEXT_AFTER_SEC."""
+        if not SHOW_TRANSCRIPTS:
+            before = [l for t, l in self.context if now - t <= CONTEXT_BEFORE_SEC]
+            if before or now >= self.show_until:
+                window_only(f"{'─' * 12} around your name {'─' * 12}")
+            for l in before:
+                window_only(l)
+        self.context.clear()
+        self.show_until = now + CONTEXT_AFTER_SEC
+
     def _check(self, text, dt, audio):
         found = find_name(text)
         hit, note = None, ""
@@ -906,8 +945,17 @@ class Listener:
                 tag = f"    (name? {hit[1]!r} — waiting for confirmation {len(self.hits)}/{CONFIRM_HITS})"
             else:
                 tag = ""
-            print(f"{self.stamp()} ({dt:.1f}s) {shown}{tag}{note}")
+            line = f"{self.stamp()} ({dt:.1f}s) {shown}{tag}{note}"
+            if hit or note:
+                self._show_context(now)
+                print(line)
+            elif SHOW_TRANSCRIPTS or now < self.show_until:
+                print(line)                              # test mode, or just after my name: show it
+            else:
+                file_only(line)                          # plain speech: only into the log file ...
+                self.context.append((now, line))         # ... but kept in case my name comes next
         elif note:
+            self._show_context(now)
             print(f"{self.stamp()} ({dt:.1f}s) {text[-160:]}{note}")
         self.last_text = key
         if confirmed and now - self.last_answer > COOLDOWN_SEC:
@@ -1320,7 +1368,9 @@ def main():
                     help="answer EVERY time the name is heard (no stop after the first answer); for testing")
     args = ap.parse_args()
 
-    global STOP_AFTER_ANSWER, COOLDOWN_SEC, RECORD_CLASSES
+    global STOP_AFTER_ANSWER, COOLDOWN_SEC, RECORD_CLASSES, SHOW_TRANSCRIPTS
+    if args.console or args.test_listen or args.test_file:
+        SHOW_TRANSCRIPTS = True                      # test modes: show everything that was heard
     if args.unlimited:
         STOP_AFTER_ANSWER = False
         COOLDOWN_SEC = UNLIMITED_COOLDOWN_SEC
