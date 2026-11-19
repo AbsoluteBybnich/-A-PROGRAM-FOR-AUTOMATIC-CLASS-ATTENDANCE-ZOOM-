@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# what the bot writes while running (logs and class recordings stay on your PC)
+logs/
+
+# IDE
+.idea/

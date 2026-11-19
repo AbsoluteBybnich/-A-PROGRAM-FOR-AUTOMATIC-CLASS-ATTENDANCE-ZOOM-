@@ -8,3 +8,6 @@ rapidfuzz
 keyboard
 pywinauto
 pyautogui
+# optional: speech recognition on an NVIDIA GPU (much faster and more accurate; the bot falls back to the CPU without them)
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10

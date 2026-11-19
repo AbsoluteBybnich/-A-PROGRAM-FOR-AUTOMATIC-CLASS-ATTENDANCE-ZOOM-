@@ -1,44 +1,31 @@
 #!/usr/bin/env python3
 """
-Control window for the Zoom bot (dark theme): buttons, clock and a live log.
+Zoom Bot control panel (dark theme). The bot starts by itself when the window opens and follows the schedule.
 
-  Start     -> launches zoom_attendance_bot.py (waits for classes on schedule and answers the roll call)
-  Stop      -> stops the bot only (Zoom stays open)
-  Shutdown  -> stops the bot AND fully closes Zoom
-  (trash)   -> clears the log
-Hover over any button to see what it does.
+  Auto-attendance ON/OFF   -> the bot keeps running and joining classes, but does / does not answer the roll call
+  Exit                     -> closes the window and stops the bot (Zoom stays as it is)
+  Exit + close Zoom        -> the same, and Zoom is closed completely
+  ☰ (top right)            -> menu: join a class by link, leave the class, today's classes, restart, clear log
 
-Lives in the same folder as zoom_attendance_bot.py. The desktop shortcut is created by
-create_desktop_shortcut.py (run it once).
+Lives next to zoom_attendance_bot.py; shared widgets are in gui_common.py.
+The desktop shortcut is created by create_desktop_shortcut.py (run it once).
 """
 import json
 import os
 import queue
 import re
 import subprocess
-import sys
 import threading
 import tkinter as tk
 from datetime import date, datetime, timedelta
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-BOT = os.path.join(BASE, "zoom_attendance_bot.py")
-SCHEDULE = os.path.join(BASE, "schedule.json")
-NOWIN = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-# ---- dark palette ----
-BG, PANEL, LOG_BG = "#16171a", "#1e2024", "#0f1013"
-FG, MUTED = "#e6e8eb", "#8b919a"
-OK, INFO, ERR, IDLE = "#3fb950", "#58a6ff", "#f85149", "#8b919a"
-BTN_START, BTN_STOP, BTN_SHUT, BTN_GHOST = (
-    ("#238636", "#2ea043"), ("#9a6700", "#bb8009"), ("#b62324", "#da3633"), ("#2b2e34", "#3a3e46"))
-
-MAX_LOG_LINES = 600                       # the log never grows beyond this (keeps the window fast for hours)
-TS_RE = re.compile(r"^\[\d\d:\d\d:\d\d\]")
+from gui_common import (AMBER, BASE, BG, BLUE, BORDER, BOT, CARD, DIM, ERR, FG, FONT, GHOST, GREEN, IDLE, INFO,
+                        MUTED, NOWIN, OK, PANEL, PY, RED, SCHEDULE, TS_RE, WARN, BotProcess, HintEntry, IconButton,
+                        LogView, Tooltip, close_zoom, dark_titlebar, enable_dpi, line_tag, looks_like_zoom_link,
+                        make_btn, setup_style)
 
 # A short wish shown under the status. One is picked per calendar day and changes at midnight.
-# Add, remove or rewrite lines freely.
 WISHES = [
     "Have a great day. May every class go smoothly.",
     "Wishing you a calm, focused and productive day.",
@@ -73,220 +60,130 @@ WISHES = [
     "Have a day as good as you deserve.",
 ]
 
-
-def find_python():
-    """Python with the installed libraries (the project's venv), without a console window."""
-    exe = sys.executable
-    if sys.prefix == sys.base_prefix:  # not running inside a venv -> look for .venv nearby/above
-        d = BASE
-        for _ in range(3):
-            cand = os.path.join(d, ".venv", "Scripts", "python.exe")
-            if os.path.exists(cand):
-                return cand
-            d = os.path.dirname(d)
-    if os.path.basename(exe).lower() == "pythonw.exe":
-        cand = os.path.join(os.path.dirname(exe), "python.exe")
-        if os.path.exists(cand):
-            return cand
-    return exe
-
-
-PY = find_python()
-
-
-def run_quiet(cmd):
-    return subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NOWIN)
-
-
-def dark_titlebar(root):
-    """Dark Windows title bar (Windows 10 2004+ / 11). Silently ignored elsewhere."""
-    try:
-        import ctypes
-        root.update_idletasks()
-        hwnd = ctypes.WinDLL("user32").GetParent(root.winfo_id())
-        val = ctypes.c_int(1)
-        for attr in (20, 19):
-            if ctypes.WinDLL("dwmapi").DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
-                break
-    except Exception:
-        pass
-
-
-class Tooltip:
-    """Small dark pop-up that explains a button when the mouse rests on it."""
-
-    def __init__(self, widget, text, delay=350):
-        self.widget, self.text, self.delay = widget, text, delay
-        self.tip = None
-        self.job = None
-        widget.bind("<Enter>", self._enter, add="+")
-        widget.bind("<Leave>", self._leave, add="+")
-        widget.bind("<ButtonPress>", self._leave, add="+")
-
-    def _enter(self, _e=None):
-        self._cancel()
-        self.job = self.widget.after(self.delay, self._show)
-
-    def _cancel(self):
-        if self.job is not None:
-            self.widget.after_cancel(self.job)
-            self.job = None
-
-    def _show(self):
-        self.job = None
-        if self.tip is not None:
-            return
-        x = self.widget.winfo_rootx() + 6
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
-        self.tip = tw = tk.Toplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        tw.attributes("-topmost", True)
-        tk.Label(tw, text=self.text, bg="#2b2e34", fg=FG, font=("Segoe UI", 9), padx=10, pady=6, justify="left",
-                 highlightthickness=1, highlightbackground="#454a53").pack()
-
-    def _leave(self, _e=None):
-        self._cancel()
-        if self.tip is not None:
-            self.tip.destroy()
-            self.tip = None
-
-
-class TrashButton(tk.Canvas):
-    """Trash-can icon button (drawn on a canvas, so it looks the same on every PC)."""
-
-    def __init__(self, parent, command, size=40):
-        k = parent.winfo_fpixels("1i") / 96.0                  # scale with Windows display scaling
-        px = int(size * k)
-        super().__init__(parent, width=px, height=px, bg=BG, highlightthickness=0, cursor="hand2")
-        self.command = command
-        self.rect = self.create_rectangle(0, 0, px, px, fill=BTN_GHOST[0], outline="")
-        c, s = "#c9ced6", lambda v: v * k * size / 40.0
-        self.create_line(s(11), s(14), s(29), s(14), fill=c, width=max(2, int(2 * k)), capstyle="round")      # lid
-        self.create_line(s(16), s(14), s(16), s(10), s(24), s(10), s(24), s(14), fill=c,
-                         width=max(2, int(2 * k)), joinstyle="round")                                         # handle
-        self.create_polygon(s(13), s(17), s(27), s(17), s(25.5), s(31), s(14.5), s(31), outline=c, fill="",
-                            width=max(2, int(2 * k)), joinstyle="round")                                      # bin
-        for x in (17.5, 20, 22.5):                                                                            # slats
-            self.create_line(s(x), s(20), s(x), s(28), fill=c, width=max(1, int(k)))
-        self.bind("<Enter>", lambda e: self.itemconfig(self.rect, fill=BTN_GHOST[1]))
-        self.bind("<Leave>", lambda e: self.itemconfig(self.rect, fill=BTN_GHOST[0]))
-        self.bind("<Button-1>", lambda e: self.command())
+HM_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
 
 
 class App:
     def __init__(self, root):
         self.root = root
-        self.proc = None
-        self.stopping = False
-        self.q = queue.Queue()
+        self.bot = BotProcess(queue.Queue())
+        self.auto_on = True
+        self.menu_open = False
         self._week_cache = (None, "")
         self._wish_day = None
 
         root.title("Zoom Bot")
         root.configure(bg=BG)
-        root.geometry("860x620")
-        root.minsize(640, 440)
-        self.build_style()
+        root.geometry("920x680")
+        root.minsize(700, 500)
+        setup_style(root)
         self.build_ui()
-
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.refresh_buttons()
-        self.log(f"Python: {PY}", "sys", stamp=False)
-        self.log(f"Bot:    {BOT}", "sys", stamp=False)
+        root.bind("<Escape>", lambda e: self.menu_open and self.toggle_menu())
+
         self.tick()
         root.after(100, self.poll)
+        root.after(300, self.start_bot)
 
     # ---------- UI ----------
-    def build_style(self):
-        s = ttk.Style(self.root)
-        s.theme_use("clam")
-        s.configure("Dark.Vertical.TScrollbar", background="#3a3e46", troughcolor=LOG_BG, bordercolor=LOG_BG,
-                    arrowcolor=FG, lightcolor="#3a3e46", darkcolor="#3a3e46", relief="flat")
-        s.map("Dark.Vertical.TScrollbar", background=[("active", "#4a4f59"), ("pressed", "#5a606b")])
-
-    def make_btn(self, parent, text, cmd, colors, size=12):
-        b = tk.Button(parent, text=text, command=cmd, bg=colors[0], fg="white",
-                      activebackground=colors[1], activeforeground="white", disabledforeground="#6b7078",
-                      font=("Segoe UI", size, "bold"), relief="flat", bd=0, padx=18, pady=10, cursor="hand2")
-        b.colors = colors
-        b.bind("<Enter>", lambda e, b=b: b["state"] == "normal" and b.config(bg=b.colors[1]))
-        b.bind("<Leave>", lambda e, b=b: b["state"] == "normal" and b.config(bg=b.colors[0]))
-        return b
-
     def build_ui(self):
         root = self.root
 
-        header = tk.Frame(root, bg=PANEL, padx=18, pady=14)
+        # header: status + wish | clock | ☰
+        header = tk.Frame(root, bg=PANEL, padx=20, pady=16)
         header.pack(fill="x")
         header.columnconfigure(0, weight=1)
 
         left = tk.Frame(header, bg=PANEL)
         left.grid(row=0, column=0, sticky="w")
-        self.status = tk.Label(left, text="● Stopped", fg=IDLE, bg=PANEL, font=("Segoe UI", 15, "bold"))
-        self.status.pack(anchor="w")
-        self.wish = tk.Label(left, text="", fg="#9aa4b2", bg=PANEL, font=("Segoe UI", 10, "italic"),
-                             wraplength=460, justify="left")
-        self.wish.pack(anchor="w", pady=(3, 0))
+        tk.Label(left, text="ZOOM BOT", fg=DIM, bg=PANEL, font=(FONT, 9, "bold")).pack(anchor="w")
+        self.status = tk.Label(left, text="● Starting…", fg=INFO, bg=PANEL, font=(FONT, 16, "bold"))
+        self.status.pack(anchor="w", pady=(2, 0))
+        self.wish = tk.Label(left, text="", fg="#9aa4b2", bg=PANEL, font=(FONT, 10, "italic"),
+                             wraplength=480, justify="left")
+        self.wish.pack(anchor="w", pady=(4, 0))
 
         right = tk.Frame(header, bg=PANEL)
-        right.grid(row=0, column=1, sticky="e")
-        self.clock = tk.Label(right, text="--:--:--", fg=FG, bg=PANEL, font=("Segoe UI", 24, "bold"))
+        right.grid(row=0, column=1, sticky="ne", padx=(16, 14))
+        self.clock = tk.Label(right, text="--:--:--", fg=FG, bg=PANEL, font=(FONT, 24, "bold"))
         self.clock.pack(anchor="e")
-        self.date = tk.Label(right, text="", fg=MUTED, bg=PANEL, font=("Segoe UI", 10))
+        self.date = tk.Label(right, text="", fg=MUTED, bg=PANEL, font=(FONT, 10))
         self.date.pack(anchor="e")
 
-        row = tk.Frame(root, bg=BG, padx=16, pady=12)
+        self.btn_menu = IconButton(header, "menu", self.toggle_menu, bg=PANEL)
+        self.btn_menu.grid(row=0, column=2, sticky="ne")
+        Tooltip(self.btn_menu, "Menu: join a class by link, leave the class,\ntoday's classes, restart the bot, clear the log")
+
+        # ☰ menu: hidden card under the header
+        self.menu = tk.Frame(root, bg=CARD, padx=20, pady=14, highlightthickness=1, highlightbackground=BORDER)
+        tk.Label(self.menu, text="Join a class by link", fg=FG, bg=CARD, font=(FONT, 11, "bold")).pack(anchor="w")
+        tk.Label(self.menu, text="The bot opens the link now and listens until the end time "
+                                 "(empty = 95 minutes). A scheduled class in progress is left for it.",
+                 fg=MUTED, bg=CARD, font=(FONT, 9), wraplength=820, justify="left").pack(anchor="w", pady=(2, 8))
+        row = tk.Frame(self.menu, bg=CARD)
         row.pack(fill="x")
-        self.btn_start = self.make_btn(row, "▶  Start", self.start, BTN_START)
-        self.btn_start.pack(side="left")
-        self.btn_stop = self.make_btn(row, "■  Stop", self.stop, BTN_STOP)
-        self.btn_stop.pack(side="left", padx=(10, 0))
-        self.btn_shutdown = self.make_btn(row, "✖  Shutdown", self.shutdown, BTN_SHUT)
-        self.btn_shutdown.pack(side="left", padx=10)
-        btn_today = self.make_btn(row, "Today's classes", self.show_today, BTN_GHOST, 10)
-        btn_today.pack(side="left", padx=(10, 0))
-        btn_clear = TrashButton(row, self.clear_log)
-        btn_clear.pack(side="left", padx=10)
+        self.link = HintEntry(row, "https://...zoom.us/j/...")
+        self.link.pack(side="left", fill="x", expand=True, ipady=5)
+        self.until = HintEntry(row, "ends at HH:MM", width=13)
+        self.until.pack(side="left", padx=8, ipady=5)
+        self.btn_join = make_btn(row, "Join now", self.join_link, BLUE, size=9, padx=12, pady=6)
+        self.btn_join.pack(side="left")
+        self.link.bind("<Return>", lambda e: self.join_link())
+        self.until.bind("<Return>", lambda e: self.join_link())
 
-        Tooltip(self.btn_start, "Start the bot: it waits for your classes on schedule,\njoins Zoom and answers the roll call")
-        Tooltip(self.btn_stop, "Stop the bot only (Zoom stays open)")
-        Tooltip(self.btn_shutdown, "Stop the bot and fully close Zoom")
-        Tooltip(btn_today, "Show the current week and today's / tomorrow's classes in the log")
-        Tooltip(btn_clear, "Clear the log")
+        tools = tk.Frame(self.menu, bg=CARD)
+        tools.pack(fill="x", pady=(12, 0))
+        b_leave = make_btn(tools, "Leave current class", self.leave_class, GHOST, size=9, pady=6, padx=12)
+        b_leave.pack(side="left")
+        b_today = make_btn(tools, "Today's classes", self.show_today, GHOST, size=9, pady=6, padx=12)
+        b_today.pack(side="left", padx=8)
+        b_restart = make_btn(tools, "Restart bot", self.restart_bot, GHOST, size=9, pady=6, padx=12)
+        b_restart.pack(side="left")
+        b_clear = make_btn(tools, "Clear log", lambda: self.logv.clear(), GHOST, size=9, pady=6, padx=12)
+        b_clear.pack(side="left", padx=8)
+        Tooltip(b_leave, "Leave the class the bot is in now (Zoom is closed)")
+        Tooltip(b_today, "Show the current week and today's / tomorrow's classes in the log")
+        Tooltip(b_restart, "Stop and start the bot again (e.g. after an error)")
 
-        frame = tk.Frame(root, bg=BG)
-        frame.pack(fill="both", expand=True, padx=16, pady=(0, 14))
-        self.text = tk.Text(frame, font=("Consolas", 10), state="disabled", wrap="word", bg=LOG_BG, fg="#d0d4da",
-                            insertbackground="white", relief="flat", bd=0, padx=10, pady=8,
-                            highlightthickness=1, highlightbackground="#2a2d33", highlightcolor="#2a2d33",
-                            selectbackground="#2f4a7a")
-        sb = ttk.Scrollbar(frame, orient="vertical", style="Dark.Vertical.TScrollbar", command=self.text.yview)
-        self.text.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        self.text.pack(side="left", fill="both", expand=True)
-        self.text.tag_config("ts", foreground="#5d636d")
-        self.text.tag_config("match", background="#4a3d00", foreground="#ffe58a")
-        self.text.tag_config("err", foreground="#ff7b72")
-        self.text.tag_config("hint", foreground="#e3b341")
-        self.text.tag_config("sys", foreground="#7aa2ff")
+        # main actions
+        self.actions = tk.Frame(root, bg=BG, padx=20, pady=12)
+        self.actions.pack(fill="x")
+        self.btn_auto = make_btn(self.actions, "", self.toggle_auto, GREEN, size=10, padx=14, pady=7)
+        self.btn_auto.pack(side="left")
+        self.btn_exit_zoom = make_btn(self.actions, "✖  Exit + close Zoom", self.exit_with_zoom, RED,
+                                      size=10, padx=12, pady=7)
+        self.btn_exit_zoom.pack(side="right")
+        self.btn_exit = make_btn(self.actions, "Exit", self.exit_app, GHOST, size=10, padx=12, pady=7)
+        self.btn_exit.pack(side="right", padx=8)
+        Tooltip(self.btn_auto, "On: the bot answers the roll call by itself.\n"
+                               "Off: it still joins classes but stays silent. Hotkey: Ctrl+Alt+P")
+        Tooltip(self.btn_exit, "Stop the bot and close this window. Zoom stays as it is")
+        Tooltip(self.btn_exit_zoom, "Stop the bot, close this window and close Zoom completely")
+        self.show_auto()
 
-    def set_enabled(self, btn, enabled):
-        if enabled:
-            btn.config(state="normal", bg=btn.colors[0], cursor="hand2")
+        # log
+        self.logv = LogView(root)
+        self.logv.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+
+    def show_auto(self):
+        if self.auto_on:
+            self.btn_auto.config(text="●  Auto-attendance: ON   —   turn off")
+            self.btn_auto.recolor(GREEN)
         else:
-            btn.config(state="disabled", bg="#2a2d33", cursor="arrow")
+            self.btn_auto.config(text="○  Auto-attendance: OFF   —   turn on")
+            self.btn_auto.recolor(AMBER)
 
-    def refresh_buttons(self):
-        self.set_enabled(self.btn_start, not self.running())
-        self.set_enabled(self.btn_stop, self.running())
-        self.set_enabled(self.btn_shutdown, True)
+    def toggle_menu(self):
+        self.menu_open = not self.menu_open
+        if self.menu_open:
+            self.menu.pack(fill="x", padx=20, pady=(14, 0), before=self.actions)
+            self.link.focus_set()
+        else:
+            self.menu.pack_forget()
+        self.btn_menu.set_active(self.menu_open)
 
     def set_status(self, text, color):
         self.status.config(text="● " + text, fg=color)
-
-    def running(self):
-        return self.proc is not None and self.proc.poll() is None
 
     # ---------- clock ----------
     def week_label(self, now):
@@ -315,83 +212,52 @@ class App:
         self.date.config(text=f"{now:%A, %d %B %Y}" + (f"   ·   {wk}" if wk else ""))
         self.root.after(max(50, 1000 - now.microsecond // 1000), self.tick)
 
-    # ---------- log ----------
-    def log(self, line, tag=None, stamp=True):
-        self.log_many([(line, tag, stamp)])
-
-    def log_many(self, items):
-        if not items:
-            return
-        at_bottom = self.text.yview()[1] >= 0.999
-        self.text.config(state="normal")
-        for line, tag, stamp in items:
-            if stamp:
-                self.text.insert("end", f"{datetime.now():%H:%M:%S}  ", "ts")
-            self.text.insert("end", line + "\n", tag or ())
-        n = int(self.text.index("end-1c").split(".")[0])
-        if n > MAX_LOG_LINES:                                  # trim old lines so the widget stays light
-            self.text.delete("1.0", f"{n - MAX_LOG_LINES + 1}.0")
-        self.text.config(state="disabled")
-        if at_bottom:
-            self.text.see("end")
-
-    def clear_log(self):
-        self.text.config(state="normal")
-        self.text.delete("1.0", "end")
-        self.text.config(state="disabled")
-
     # ---------- actions ----------
-    def start(self):
-        if self.running():
-            return
-        if not os.path.exists(BOT):
-            messagebox.showerror("Zoom Bot", f"File not found:\n{BOT}")
-            return
-        self.stopping = False
-        self.log(f"=== starting the bot · {datetime.now():%a %d %b %Y %H:%M:%S} ===", "sys", stamp=False)
+    def start_bot(self):
+        self.logv.log(f"=== starting the bot · {datetime.now():%a %d %b %Y %H:%M:%S} ===", "sys", stamp=False)
         self.set_status("Starting… (loading the model)", INFO)
-        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-        try:
-            self.proc = subprocess.Popen(
-                [PY, "-u", BOT], cwd=BASE, env=env, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace", bufsize=1,
-                creationflags=NOWIN,
-            )
-        except Exception as e:
-            self.set_status("Failed to start", ERR)
-            self.log(f"Could not start: {e!r}", "err")
+        self.auto_on = True                                    # a new bot process starts with answers on
+        self.show_auto()
+        if not self.bot.start():
+            self.set_status("Failed to start — see log", ERR)
+
+    def restart_bot(self):
+        if self.bot.kill():
+            self.logv.log("=== bot stopped for restart ===", "sys")
+        self.root.after(800, self.start_bot)
+
+    def toggle_auto(self):
+        if not self.bot.running():
+            self.logv.log("The bot is not running — use ☰ → Restart bot", "err")
             return
-        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
-        self.refresh_buttons()
+        self.auto_on = not self.auto_on                        # optimistic; the bot confirms with a log line
+        self.show_auto()
+        self.bot.send("resume" if self.auto_on else "pause")
 
-    def _reader(self, proc):
-        for line in proc.stdout:
-            self.q.put(("line", line.rstrip()))
-        proc.wait()
-        self.q.put(("exit", proc.returncode))
+    def join_link(self):
+        link, until = self.link.value(), self.until.value()
+        if not looks_like_zoom_link(link):
+            self.logv.log("Paste a Zoom link first (…zoom.us/j/…)", "err")
+            self.link.focus_set()
+            return
+        if until and not HM_RE.match(until):
+            self.logv.log("End time must look like 10:30 (or leave it empty)", "err")
+            self.until.focus_set()
+            return
+        if not self.bot.running():
+            self.logv.log("The bot is not running — use ☰ → Restart bot", "err")
+            return
+        self.bot.send(f"join {link} {until}".strip())
+        self.link.clear()
+        self.until.clear()
+        self.toggle_menu()
 
-    def _kill_bot(self):
-        self.stopping = True
-        was_running = self.running()
-        if was_running:
-            run_quiet(["taskkill", "/F", "/T", "/PID", str(self.proc.pid)])
-        return was_running
-
-    def stop(self):
-        """Stop the bot only; Zoom is left as it is."""
-        if self._kill_bot():
-            self.log("=== bot stopped (Zoom left open) ===", "sys")
-        self.set_status("Stopped", IDLE)
-        self.refresh_buttons()
-
-    def shutdown(self):
-        """Stop the bot and fully close Zoom."""
-        self._kill_bot()
-        run_quiet(["taskkill", "/F", "/IM", "Zoom.exe"])
-        self.log("=== bot stopped, Zoom closed ===", "sys")
-        self.set_status("Stopped", IDLE)
-        self.refresh_buttons()
+    def leave_class(self):
+        if self.bot.running():
+            self.bot.send("leave")
+        else:
+            close_zoom()
+            self.logv.log("Zoom closed", "sys")
 
     def show_today(self):
         def work():
@@ -400,48 +266,48 @@ class App:
                                    encoding="utf-8", errors="replace", creationflags=NOWIN,
                                    env=dict(os.environ, PYTHONIOENCODING="utf-8"))
                 for ln in (r.stdout + r.stderr).splitlines():
-                    self.q.put(("line", ln))
+                    self.bot.q.put(("line", ln))
             except Exception as e:
-                self.q.put(("line", f"ERROR: {e!r}"))
+                self.bot.q.put(("line", f"ERROR: {e!r}"))
         threading.Thread(target=work, daemon=True).start()
 
-    def on_close(self):
-        if self.running():
-            if not messagebox.askyesno("Zoom Bot", "The bot is running. Shut it down (the bot stops and Zoom closes) and exit?"):
-                return
-            self.shutdown()
+    def exit_app(self):
+        self.bot.kill()
         self.root.destroy()
+
+    def exit_with_zoom(self):
+        self.bot.kill()
+        close_zoom()
+        self.root.destroy()
+
+    def on_close(self):
+        if self.bot.running() and not messagebox.askyesno(
+                "Zoom Bot", "Close the window? The bot will stop and will not join or answer classes.\n"
+                            "(Zoom stays as it is.)"):
+            return
+        self.exit_app()
 
     # ---------- bot output ----------
     def poll(self):
-        items, exit_code, exited = [], None, False
-        try:
-            for _ in range(300):                               # drain a batch, then draw once
-                kind, val = self.q.get_nowait()
-                if kind == "line":
-                    items.append(self.classify(val))
-                else:
-                    exited, exit_code = True, val
-        except queue.Empty:
-            pass
-        self.log_many(items)
-        if exited:
-            if not self.stopping:
-                self.log(f"=== bot exited (code {exit_code}) ===", "err" if exit_code else "sys")
-                self.set_status("Stopped" if not exit_code else "Stopped (error, see log)", IDLE if not exit_code else ERR)
-            self.refresh_buttons()
+        items = []
+        for kind, val in self.bot.drain():
+            if kind == "line":
+                self.react(val)
+                items.append((val, line_tag(val), not TS_RE.match(val)))
+            elif not self.bot.stopping:
+                items.append((f"=== bot exited (code {val}) — ☰ → Restart bot ===", "err" if val else "sys", False))
+                self.set_status("Bot stopped (see log)" if val else "Bot stopped", ERR if val else IDLE)
+        self.logv.log_many(items)
         self.root.after(100, self.poll)
 
-    def classify(self, line):
+    def react(self, line):
         low = line.lower()
-        tag = None
-        if "<<<" in line or "[answer] answering" in low or "[answer] done" in low:
-            tag = "match"
-        elif "[hint]" in low:
-            tag = "hint"
-        elif "traceback" in low or "error" in low:
-            tag = "err"
-
+        if "[pause] answers paused" in low:
+            self.auto_on = False
+            self.show_auto()
+        elif "[pause] answers enabled" in low:
+            self.auto_on = True
+            self.show_auto()
         if "[answer] error" in low:
             self.set_status("In class — answer failed, will retry", ERR)
         elif "[answer] answering" in low:
@@ -449,18 +315,15 @@ class App:
         elif "listening stopped" in low:
             self.set_status("In class — answered, listening stopped", OK)
         elif "[sched]" in low or "class ended" in low:
-            self.set_status("Running — waiting for classes", OK)
+            self.set_status("Waiting for classes", OK)
         elif "joining class" in low:
             self.set_status("In class — listening", INFO)
-        return line, tag, not TS_RE.match(line)
+        elif "[pause] answers paused" in low:
+            self.set_status("Auto-attendance is off", WARN)
 
 
 def main():
-    try:
-        import ctypes
-        ctypes.WinDLL("shcore").SetProcessDpiAwareness(1)         # crisp text on high-DPI screens
-    except Exception:
-        pass
+    enable_dpi()
     root = tk.Tk()
     root.withdraw()
     App(root)

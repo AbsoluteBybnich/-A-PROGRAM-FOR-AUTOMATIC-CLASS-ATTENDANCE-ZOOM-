@@ -49,7 +49,7 @@ def main():
         bot.lower_priority()
 
     if not join_only:
-        model = bot.load_model()          # load in advance so listening starts right after joining
+        model, device = bot.load_model()  # load in advance so listening starts right after joining
         try:
             responder = bot.Responder()
         except Exception as e:
@@ -86,7 +86,7 @@ def main():
 
     bot.STOP_AFTER_ANSWER = not UNLIMITED_ANSWERS      # keep listening after an answer
     bot.COOLDOWN_SEC = COOLDOWN_SEC
-    listener = bot.Listener(model, responder)
+    listener = bot.Listener(model, device, responder)
     listener.start()
     listener.arm()
     end = datetime.now() + timedelta(minutes=LISTEN_MINUTES)
