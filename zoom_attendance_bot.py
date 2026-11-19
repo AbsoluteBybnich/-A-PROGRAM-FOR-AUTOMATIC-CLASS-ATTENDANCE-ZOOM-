@@ -139,6 +139,7 @@ LOG_KEEP_DAYS = 30
 RECORD_CLASSES = True    # save what the bot heard in each class to logs/recordings/*.ogg (~1 MB per minute).
                          # Only on this PC; used to check and tune recognition on the real teacher's voice
 RECORD_KEEP = 6          # keep only the last N class recordings
+CLASS_COUNT_AFTER_MIN = 5    # statistics: a class counts as "attended" only after this many minutes in the conference
 
 # Timings
 WINDOW_SEC = 6.0         # how many of the latest seconds of audio to analyze
@@ -993,14 +994,15 @@ def attend(link, end_dt, listener, title=""):
     link = link.strip().rstrip(".,;)")
     LEAVE_REQ.clear()
     print(f"[{datetime.now():%H:%M:%S}] joining class '{title}', ends at {end_dt:%H:%M}")
-    STATS.update(classes=1, last_class=f"{datetime.now():%Y-%m-%d %H:%M} {title}".strip())
     counted = time.time()                               # time in Zoom is added every 30 s (safe if the bot is killed)
+    class_counted = False                               # "classes attended" +1 only after CLASS_COUNT_AFTER_MIN in it
     open_target(link if OPEN_LINK_DIRECTLY else (to_zoom_uri(link) or link))
     time.sleep(JOIN_WAIT_SEC)
     click_join()
     time.sleep(AFTER_JOIN_SEC)
 
     listener.arm(title)
+    joined = time.time()                                # presence in the conference counts from here
     limit_min = LISTEN_LIMIT_MIN or 0
     listen_until = datetime.now() + timedelta(minutes=limit_min) if limit_min else end_dt
     try:
@@ -1018,6 +1020,11 @@ def attend(link, end_dt, listener, title=""):
             if time.time() - counted >= 30:
                 STATS.update(zoom_seconds=time.time() - counted)
                 counted = time.time()
+            if not class_counted and time.time() - joined >= CLASS_COUNT_AFTER_MIN * 60:
+                class_counted = True
+                STATS.update(classes=1, last_class=f"{datetime.now():%Y-%m-%d %H:%M} {title}".strip())
+                if STATS.enabled:
+                    print(f"{ts()} [stats] {CLASS_COUNT_AFTER_MIN} min in the class — counted as attended")
     finally:
         listener.disarm()
         STATS.update(zoom_seconds=time.time() - counted)
