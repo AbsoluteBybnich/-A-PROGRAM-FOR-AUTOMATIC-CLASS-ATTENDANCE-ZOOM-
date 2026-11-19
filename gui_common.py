@@ -348,3 +348,37 @@ class BotProcess:
 
 def looks_like_zoom_link(s):
     return bool(re.search(r"(zoom\.us|zoommtg:)", s or "", re.I))
+
+
+# ---------- statistics written by the bot (logs/stats.json) ----------
+STATS_FILE = os.path.join(BASE, "logs", "stats.json")
+
+
+def read_stats():
+    """{} when there are no statistics yet."""
+    import json
+    try:
+        with open(STATS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def fmt_hours(seconds):
+    s = int(seconds or 0)
+    h, m = s // 3600, s % 3600 // 60
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
+
+class StatTile(tk.Frame):
+    """Small tile: big value + caption."""
+
+    def __init__(self, parent, caption, accent=FG):
+        super().__init__(parent, bg=CARD, padx=14, pady=7, highlightthickness=1, highlightbackground=BORDER)
+        self.value = tk.Label(self, text="—", fg=accent, bg=CARD, font=(FONT, 13, "bold"))
+        self.value.pack(anchor="w")
+        tk.Label(self, text=caption, fg=MUTED, bg=CARD, font=(FONT, 8)).pack(anchor="w")
+
+    def set(self, text):
+        if self.value["text"] != text:
+            self.value.config(text=text)

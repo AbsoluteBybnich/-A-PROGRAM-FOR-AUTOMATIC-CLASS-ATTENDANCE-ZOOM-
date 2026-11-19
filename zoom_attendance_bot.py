@@ -230,6 +230,54 @@ def is_prompt_echo(text: str) -> bool:
 # ---------- system helpers ----------
 LOG_DIR = os.path.join(BASE, "logs")
 RECORD_DIR = os.path.join(LOG_DIR, "recordings")
+STATS_FILE = os.path.join(LOG_DIR, "stats.json")
+
+
+class Stats:
+    """Lifetime counters in logs/stats.json (survive restarts; the control panel shows them).
+    Test modes (--console, --test-*) do not count."""
+
+    def __init__(self, path):
+        self.path = path
+        self.enabled = True
+        self.lock = threading.Lock()
+        self.data = {"since": datetime.now().strftime("%Y-%m-%d"), "zoom_seconds": 0.0, "classes": 0,
+                     "auto_answers": 0, "skipped_calls": 0, "last_class": "", "last_answer": ""}
+        try:
+            with open(path, encoding="utf-8") as f:
+                self.data.update(json.load(f))
+        except (OSError, ValueError):
+            pass
+
+    def _save(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)                     # atomic: the panel never reads half a file
+
+    def update(self, **changes):
+        """update(zoom_seconds=+30.0, classes=+1, last_class="...") — numbers are added, text is replaced."""
+        if not self.enabled:
+            return
+        with self.lock:
+            for k, v in changes.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    self.data[k] = self.data.get(k, 0) + v
+                else:
+                    self.data[k] = v
+            try:
+                self._save()
+            except OSError as e:
+                print(f"[stats] could not save: {e!r}")
+
+    def summary(self):
+        s = int(self.data.get("zoom_seconds", 0))
+        return (f"in Zoom with the bot: {s // 3600}h {s % 3600 // 60:02d}m · classes: {self.data.get('classes', 0)}"
+                f" · auto-answers: {self.data.get('auto_answers', 0)}")
+
+
+STATS = Stats(STATS_FILE)
 
 
 class _Tee:
@@ -772,6 +820,7 @@ class Listener:
         if PAUSED.is_set():
             self.last_answer = self.clock()             # count this call once, do not repeat the message every pass
             print(f"{self.stamp()} [pause] paused — not answering")
+            STATS.update(skipped_calls=1)
             return
         self.last_answer = time.time()
         print("[answer] answering...")
@@ -786,6 +835,7 @@ class Listener:
             self.last_answer = time.time() - COOLDOWN_SEC + RETRY_AFTER_FAIL_SEC   # allow a retry soon
         else:
             print("[answer] done")
+            STATS.update(auto_answers=1, last_answer=datetime.now().strftime("%Y-%m-%d %H:%M"))
             if STOP_AFTER_ANSWER:
                 self.active.clear()
                 print("[listen] answered — listening stopped for this class")
@@ -943,6 +993,8 @@ def attend(link, end_dt, listener, title=""):
     link = link.strip().rstrip(".,;)")
     LEAVE_REQ.clear()
     print(f"[{datetime.now():%H:%M:%S}] joining class '{title}', ends at {end_dt:%H:%M}")
+    STATS.update(classes=1, last_class=f"{datetime.now():%Y-%m-%d %H:%M} {title}".strip())
+    counted = time.time()                               # time in Zoom is added every 30 s (safe if the bot is killed)
     open_target(link if OPEN_LINK_DIRECTLY else (to_zoom_uri(link) or link))
     time.sleep(JOIN_WAIT_SEC)
     click_join()
@@ -963,9 +1015,15 @@ def attend(link, end_dt, listener, title=""):
             if not JOIN_REQS.empty():                     # a new link was sent: switch to it
                 print(f"{ts()} [control] switching to the new link")
                 break
+            if time.time() - counted >= 30:
+                STATS.update(zoom_seconds=time.time() - counted)
+                counted = time.time()
     finally:
         listener.disarm()
+        STATS.update(zoom_seconds=time.time() - counted)
     print(f"[{datetime.now():%H:%M:%S}] class ended")
+    if STATS.enabled:
+        print(f"[stats] {STATS.summary()}")
     if KILL_ZOOM_AT_END:
         kill_zoom()
 
@@ -1260,7 +1318,8 @@ def main():
         STOP_AFTER_ANSWER = False
         COOLDOWN_SEC = UNLIMITED_COOLDOWN_SEC
     if args.console:
-        RECORD_CLASSES = False                       # test sessions are not recorded
+        RECORD_CLASSES = False                       # test sessions are not recorded ...
+        STATS.enabled = False                        # ... and do not count in the statistics
 
     if args.today:
         print_today()

@@ -22,8 +22,8 @@ from tkinter import messagebox
 
 from gui_common import (AMBER, BASE, BG, BLUE, BORDER, BOT, CARD, DIM, ERR, FG, FONT, GHOST, GREEN, IDLE, INFO,
                         MUTED, NOWIN, OK, PANEL, PY, RED, SCHEDULE, TS_RE, WARN, BotProcess, HintEntry, IconButton,
-                        LogView, Tooltip, close_zoom, dark_titlebar, enable_dpi, line_tag, looks_like_zoom_link,
-                        make_btn, setup_style)
+                        LogView, StatTile, Tooltip, close_zoom, dark_titlebar, enable_dpi, fmt_hours, line_tag,
+                        looks_like_zoom_link, make_btn, read_stats, setup_style)
 
 # A short wish shown under the status. One is picked per calendar day and changes at midnight.
 WISHES = [
@@ -161,6 +161,22 @@ class App:
         Tooltip(self.btn_exit_zoom, "Stop the bot, close this window and close Zoom completely")
         self.show_auto()
 
+        # statistics (logs/stats.json, written by the bot)
+        stats = tk.Frame(root, bg=BG, padx=20)
+        stats.pack(fill="x", pady=(0, 12))
+        self.st_hours = StatTile(stats, "in Zoom with the bot", "#79c0ff")
+        self.st_answers = StatTile(stats, "auto-answers", "#ffe58a")
+        self.st_classes = StatTile(stats, "classes attended", "#56d364")
+        self.st_skipped = StatTile(stats, "calls skipped (auto-attendance off)", MUTED)
+        for i, t in enumerate((self.st_hours, self.st_answers, self.st_classes, self.st_skipped)):
+            t.pack(side="left", padx=(0 if i == 0 else 8, 0))
+        self.st_since = tk.Label(stats, text="", fg=DIM, bg=BG, font=(FONT, 9), justify="right")
+        self.st_since.pack(side="right", anchor="s")
+        Tooltip(self.st_hours, "Time from opening a class link to the end of the class.\n"
+                               "The test bench does not count")
+        Tooltip(self.st_answers, "How many times the bot answered the roll call by itself")
+        self.refresh_stats()
+
         # log
         self.logv = LogView(root)
         self.logv.pack(fill="both", expand=True, padx=20, pady=(0, 16))
@@ -172,6 +188,20 @@ class App:
         else:
             self.btn_auto.config(text="○  Auto-attendance: OFF   —   turn on")
             self.btn_auto.recolor(AMBER)
+
+    def refresh_stats(self):
+        s = read_stats()
+        self.st_hours.set(fmt_hours(s.get("zoom_seconds", 0)))
+        self.st_answers.set(str(s.get("auto_answers", 0)))
+        self.st_classes.set(str(s.get("classes", 0)))
+        self.st_skipped.set(str(s.get("skipped_calls", 0)))
+        lines = []
+        if s.get("since"):
+            lines.append(f"counting since {s['since']}")
+        if s.get("last_answer"):
+            lines.append(f"last answer {s['last_answer']}")
+        self.st_since.config(text="\n".join(lines) or "no classes counted yet")
+        self.root.after(5000, self.refresh_stats)
 
     def toggle_menu(self):
         self.menu_open = not self.menu_open
