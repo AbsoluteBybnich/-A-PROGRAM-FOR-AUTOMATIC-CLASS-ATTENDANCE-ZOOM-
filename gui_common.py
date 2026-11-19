@@ -350,6 +350,26 @@ def looks_like_zoom_link(s):
     return bool(re.search(r"(zoom\.us|zoommtg:)", s or "", re.I))
 
 
+# ---------- schedule (same rules as the bot: weeks alternate 1, 2, 1, 2 ...) ----------
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def schedule_for(day):
+    """(week number or None, [lessons sorted by start]) for a date, read from schedule.json."""
+    import json
+    from datetime import timedelta
+    with open(SCHEDULE, encoding="utf-8") as f:
+        cfg = json.load(f)
+    anchor = datetime.strptime(cfg["week1_monday"], "%Y-%m-%d").date()
+    anchor -= timedelta(days=anchor.weekday())
+    monday = day - timedelta(days=day.weekday())
+    wk = ((monday - anchor).days // 7) % 2 + 1
+    name = DAYS[day.weekday()]
+    out = [l for l in cfg.get("lessons", [])
+           if l.get("week") in (None, wk) and name in [d.lower() for d in l.get("days", [])]]
+    return wk, sorted(out, key=lambda l: l.get("start", ""))
+
+
 # ---------- statistics written by the bot (logs/stats.json) ----------
 STATS_FILE = os.path.join(BASE, "logs", "stats.json")
 
@@ -373,11 +393,11 @@ def fmt_hours(seconds):
 class StatTile(tk.Frame):
     """Small tile: big value + caption."""
 
-    def __init__(self, parent, caption, accent=FG):
-        super().__init__(parent, bg=CARD, padx=14, pady=7, highlightthickness=1, highlightbackground=BORDER)
-        self.value = tk.Label(self, text="—", fg=accent, bg=CARD, font=(FONT, 13, "bold"))
+    def __init__(self, parent, caption, accent=FG, bg=CARD, size=13):
+        super().__init__(parent, bg=bg, padx=14, pady=8, highlightthickness=1, highlightbackground=BORDER)
+        self.value = tk.Label(self, text="—", fg=accent, bg=bg, font=(FONT, size, "bold"))
         self.value.pack(anchor="w")
-        tk.Label(self, text=caption, fg=MUTED, bg=CARD, font=(FONT, 8)).pack(anchor="w")
+        tk.Label(self, text=caption, fg=MUTED, bg=bg, font=(FONT, 9)).pack(anchor="w")
 
     def set(self, text):
         if self.value["text"] != text:
