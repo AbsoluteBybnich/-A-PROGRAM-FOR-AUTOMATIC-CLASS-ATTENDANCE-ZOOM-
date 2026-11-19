@@ -482,6 +482,11 @@ class App:
 
     def react(self, line):
         low = line.lower()
+        if "[exit] answered the roll call" in low:              # EXIT_AFTER_ANSWER: the whole app turns off
+            self.bot.stopping = True                            # its exit is expected, not an error
+            self.set_status("Answered — turning off, Zoom stays in the class", OK)
+            self.root.after(3000, self.root.destroy)
+            return
         if "[pause] answers paused" in low:
             self.auto_on = False
             self.show_auto()

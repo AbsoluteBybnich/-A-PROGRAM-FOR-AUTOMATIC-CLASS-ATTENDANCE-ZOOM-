@@ -122,6 +122,9 @@ CONFIRM_WINDOW_SEC = 8.0 # ... within this many seconds (filters one-off mis-hea
 COOLDOWN_SEC = 60        # after an answer, do not answer again for this many seconds
 UNLIMITED_COOLDOWN_SEC = 4   # the same with --unlimited (test app): answer every time, just not twice to one call
 STOP_AFTER_ANSWER = True # after the first successful answer, stop listening for the rest of that class
+EXIT_AFTER_ANSWER = True # after answering the roll call the bot (and the control panel) turns off completely,
+                         # Zoom stays open and you stay in the class. Later classes that day are then NOT joined.
+                         # False = keep running and follow the schedule. The test bench never exits
 RETRY_AFTER_FAIL_SEC = 8 # if answering failed, retry after this many seconds
 DEAF_AFTER_ANSWER_SEC = 3.0  # ignore captured audio while answering and this long after (your answer says the surname too)
 
@@ -864,6 +867,8 @@ class Listener:
         else:
             print("[answer] done")
             STATS.update(auto_answers=1, last_answer=datetime.now().strftime("%Y-%m-%d %H:%M"))
+            if EXIT_AFTER_ANSWER and STOP_AFTER_ANSWER:
+                EXIT_REQ.set()                           # attend() ends the program and leaves Zoom open
             if STOP_AFTER_ANSWER:
                 self.active.clear()
                 print("[listen] answered — listening stopped for this class")
@@ -1053,8 +1058,12 @@ def attend(link, end_dt, listener, title=""):
     joined = time.time()                                # presence in the conference counts from here
     limit_min = LISTEN_LIMIT_MIN or 0
     listen_until = datetime.now() + timedelta(minutes=limit_min) if limit_min else end_dt
+    stay_in_class = False
     try:
         while datetime.now() < end_dt:
+            if EXIT_REQ.is_set():                         # answered the roll call -> turn off, stay in Zoom
+                stay_in_class = True
+                break
             if listener.active.is_set() and datetime.now() >= listen_until:
                 listener.disarm()
                 print("[listen] time limit reached — listening stopped for this class")
@@ -1076,6 +1085,13 @@ def attend(link, end_dt, listener, title=""):
     finally:
         listener.disarm()
         STATS.update(zoom_seconds=time.time() - counted)
+    if stay_in_class:
+        if not class_counted:                             # answered = was there, even before the 5 minutes
+            STATS.update(classes=1, last_class=f"{datetime.now():%Y-%m-%d %H:%M} {title}".strip())
+        if STATS.enabled:
+            print(f"[stats] {STATS.summary()}")
+        print(f"{ts()} [exit] answered the roll call — the bot turns off, Zoom stays in the class")
+        raise SystemExit(0)
     print(f"[{datetime.now():%H:%M:%S}] class ended")
     if STATS.enabled:
         print(f"[stats] {STATS.summary()}")
@@ -1086,6 +1102,7 @@ def attend(link, end_dt, listener, title=""):
 # ---------- commands from the control window (one per line on stdin) ----------
 JOIN_REQS = queue.Queue()        # (link, "HH:MM" or None)
 LEAVE_REQ = threading.Event()
+EXIT_REQ = threading.Event()     # set after the roll call was answered (EXIT_AFTER_ANSWER)
 MANUAL_CLASS_MIN = 95            # a class joined by link without an end time lasts this long
 
 
@@ -1368,7 +1385,9 @@ def main():
                     help="answer EVERY time the name is heard (no stop after the first answer); for testing")
     args = ap.parse_args()
 
-    global STOP_AFTER_ANSWER, COOLDOWN_SEC, RECORD_CLASSES, SHOW_TRANSCRIPTS
+    global STOP_AFTER_ANSWER, COOLDOWN_SEC, RECORD_CLASSES, SHOW_TRANSCRIPTS, EXIT_AFTER_ANSWER
+    if args.console or args.unlimited:
+        EXIT_AFTER_ANSWER = False                    # the test bench keeps running and answering
     if args.console or args.test_listen or args.test_file:
         SHOW_TRANSCRIPTS = True                      # test modes: show everything that was heard
     if args.unlimited:
